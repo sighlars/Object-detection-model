@@ -1,64 +1,4 @@
-
-
-import torch
-# Create YOLO-style image batches
-batch = torch.zeros((16, 3, 640, 640), dtype=torch.float16)  # YOLO-native size
-# Simulate RAM constraints
-with torch.autocast('cpu'):  # Even on CPU!
-    processed = batch * 255
-print(f"Memory saved: {batch.element_size() * batch.nelement() / 1e6}MB → {processed.element_size() * processed.nelement() / 1e6}MB")
-
-
-# In[14]:
-
-
-bad_tensor = torch.zeros(256,256, dtype=torch.float64)  # 8 bytes per number
-good_tensor = torch.zeros(256,256, dtype=torch.float16)  # 2 bytes per number
-
-print(f"Memory saved: {bad_tensor.element_size() * bad_tensor.nelement() / 1e6}MB → {good_tensor.element_size() * good_tensor.nelement() / 1e6}MB")
-
-
-# In[15]:
-
-
-number_1 = torch.tensor([36.4, 36.7, 36.5, 36.6, 36.5], dtype=torch.float16)
-number_2 = torch.tensor((3, 128, 128), dtype= torch.float16)
-number_3 = torch.tensor((10, 1, 256, 256), dtype = torch.float16)
-
-
-# In[16]:
-
-
-def print_memory(tensor, name):
-    bytes = tensor.element_size() * tensor.nelement()
-    print(f"{name}: {bytes / 1024}KB")
-
-
-
-print_memory(number_2, 'test')
-
-
-# In[17]:
-
-
-# 1. Temperature vector
-temps = torch.tensor([36.4, 36.7, 36.5, 36.6, 36.5], dtype=torch.float16)
-
-# 2. RGB image (3 channels, 128x128)
-rgb_image = torch.zeros((3, 128, 128), dtype=torch.float16)
-
-# 3. MRI slices (10 slices, 1 channel, 256x256)
-mri_volume = torch.rand((10, 1, 256, 256), dtype=torch.float16)
-
-# Memory calculations
-print_memory(temps, "Temperatures")        # ~0.01KB
-print_memory(rgb_image, "RGB Image")       # 3*128*128*2 = 98KB
-print_memory(mri_volume, "MRI Volume")     # 10*1*256*256*2 = 1.25MB
-
-
-# In[18]:
-
-import streamlit as st 
+import gradio as gr
 from ultralytics import YOLO
 from PIL import Image
 import numpy as np
@@ -68,76 +8,207 @@ import time
 # Load the standard YOLOv8 model (downloads it if not present)
 model = YOLO('yolov8n.pt')  # Standard YOLOv8 model with 80 COCO classes
 
-# ======= STREAMLIT UI =======
-st.title(" Object Detection")
-st.write("Upload an image to detect objects from the 80 COCO classes")
-
-# Image upload
-uploaded_file = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png"])
-
-if uploaded_file is not None:
-    # Read and display the original image
-    image = Image.open(uploaded_file).convert("RGB")
-    st.image(image, caption="Uploaded Image", use_column_width=True)
+def detect_objects(image, confidence_threshold=0.25):
+    """
+    Detect objects in the uploaded image using YOLOv8
     
-    # Convert image to numpy array
+    Args:
+        image: PIL Image or numpy array
+        confidence_threshold: Minimum confidence for detections
+    
+    Returns:
+        annotated_image: Image with bounding boxes
+        detection_summary: Text summary of detections
+    """
+    if image is None:
+        return None, "Please upload an image first."
+    
+    # Convert to PIL Image if needed
+    if isinstance(image, np.ndarray):
+        image = Image.fromarray(image)
+    
+    # Convert to RGB if needed
+    if image.mode != 'RGB':
+        image = image.convert('RGB')
+    
+    # Convert to numpy array for YOLO
     img_array = np.array(image)
     
-    # Show processing indicator
-    with st.spinner("Detecting objects..."):
-        # Add small delay to show the spinner
-        time.sleep(0.5)
-        
-        # Run inference with YOLOv8
-        results = model.predict(img_array, conf=0.25)  # Set confidence threshold
-    
-    # Display results
-    st.write("### Detection Results")
+    # Run inference with YOLOv8
+    results = model.predict(img_array, conf=confidence_threshold)
     
     # Get the results from the first image
     result = results[0]
     
-    # Display the annotated image with bounding boxes
+    # Create annotated image with bounding boxes
     annotated_img = result.plot()
-    st.image(annotated_img, caption="Detection Results", use_column_width=True)
     
-    # Show detection summary
-    if result.boxes is not None and len(result.boxes) > 0:
-        st.write(f"Detected {len(result.boxes)} objects:")
+    # Convert back to PIL Image for Gradio
+    annotated_img = Image.fromarray(annotated_img)
+    
+    # Generate detection summary
+    detection_summary = generate_summary(result)
+    
+    return annotated_img, detection_summary
+
+def generate_summary(result):
+    """Generate a text summary of the detections"""
+    if result.boxes is None or len(result.boxes) == 0:
+        return "No objects detected with the current confidence threshold."
+    
+    # Create summary text
+    summary_lines = [f"🎯 **Detected {len(result.boxes)} objects:**\n"]
+    
+    # Create a dictionary to count objects by class
+    class_counts = {}
+    detections_detail = []
+    
+    # Process each detection
+    for i, box in enumerate(result.boxes):
+        # Get class name and confidence
+        class_id = int(box.cls[0].item())
+        class_name = result.names[class_id]
+        confidence = box.conf[0].item()
         
-        # Create a dictionary to count objects by class
-        class_counts = {}
+        # Add to count
+        if class_name in class_counts:
+            class_counts[class_name] += 1
+        else:
+            class_counts[class_name] = 1
         
-        # Process each detection
-        for box in result.boxes:
-            # Get class name and confidence
-            class_id = int(box.cls[0].item())
-            class_name = result.names[class_id]
-            confidence = box.conf[0].item()
-            
-            # Add to count
-            if class_name in class_counts:
-                class_counts[class_name] += 1
-            else:
-                class_counts[class_name] = 1
-                
-            # Get bounding box coordinates (optional)
-            # bbox = box.xyxy[0].tolist()  # in (x1, y1, x2, y2) format
+        # Add detailed detection info
+        detections_detail.append(f"  • {class_name}: {confidence:.2%} confidence")
+    
+    # Add class counts summary
+    summary_lines.append("**📊 Summary by Object Type:**")
+    for class_name, count in sorted(class_counts.items()):
+        summary_lines.append(f"  • {class_name}: {count}")
+    
+    # Add detailed detections
+    summary_lines.append("\n**🔍 Detailed Detections:**")
+    summary_lines.extend(detections_detail)
+    
+    # Add model info
+    summary_lines.append("\n**ℹ️ Model Information:**")
+    summary_lines.append("  • Model: YOLOv8n (nano variant)")
+    summary_lines.append("  • Classes: 80 COCO dataset classes")
+    summary_lines.append("  • Framework: Ultralytics YOLOv8")
+    
+    return "\n".join(summary_lines)
+
+# ======= GRADIO INTERFACE =======
+def create_interface():
+    """Create the Gradio interface"""
+    
+    with gr.Blocks(title="🎯 Object Detection with YOLOv8") as interface:
         
-        # Display summary table
-        st.write("#### Objects Detected")
-        for class_name, count in class_counts.items():
-            st.write(f"- {class_name}: {count}")
-    else:
-        st.write("No objects detected with confidence above threshold.")
-        
-    # Show model information
-    with st.expander("Model Information"):
-        st.write("""
-        **Model:** YOLOv8n (nano variant)
-        **Classes:** 80 COCO dataset classes
-        **Framework:** Ultralytics YOLOv8
-        
-        This model can detect common objects like people, animals, vehicles, and everyday items.
-        You can adjust the confidence threshold for more or fewer detections.
+        # Header
+        gr.HTML("""
+        <div style="text-align: center; padding: 20px;">
+            <h1>🎯 Object Detection with YOLOv8</h1>
+            <p>Upload an image to detect objects from the 80 COCO classes</p>
+        </div>
         """)
+        
+        with gr.Row():
+            with gr.Column(scale=1):
+                # Input section
+                gr.HTML("<h3>📤 Upload Image</h3>")
+                input_image = gr.Image(
+                    label="Choose an image",
+                    type="pil",
+                    height=400
+                )
+                
+                # Confidence threshold slider
+                confidence_slider = gr.Slider(
+                    minimum=0.1,
+                    maximum=1.0,
+                    value=0.25,
+                    step=0.05,
+                    label="🎚️ Confidence Threshold",
+                    info="Minimum confidence for detections"
+                )
+                
+                # Detect button
+                detect_btn = gr.Button(
+                    "🔍 Detect Objects",
+                    variant="primary",
+                    size="lg"
+                )
+                
+            with gr.Column(scale=1):
+                # Output section
+                gr.HTML("<h3>📋 Detection Results</h3>")
+                output_image = gr.Image(
+                    label="Detection Results",
+                    height=400
+                )
+                
+                # Detection summary
+                detection_text = gr.Textbox(
+                    label="📊 Detection Summary",
+                    lines=15,
+                    max_lines=20,
+                    show_copy_button=True
+                )
+        
+        # Examples section
+        gr.HTML("<h3>💡 Try These Examples</h3>")
+        
+        # Example images (you can add your own example images here)
+        examples = gr.Examples(
+            examples=[
+                # You can add example images here
+                # ["path/to/example1.jpg", 0.25],
+                # ["path/to/example2.jpg", 0.3],
+            ],
+            inputs=[input_image, confidence_slider],
+            outputs=[output_image, detection_text],
+            fn=detect_objects,
+            cache_examples=False
+        )
+        
+        # Event handlers
+        detect_btn.click(
+            fn=detect_objects,
+            inputs=[input_image, confidence_slider],
+            outputs=[output_image, detection_text]
+        )
+        
+        # Auto-detect when image is uploaded
+        input_image.change(
+            fn=detect_objects,
+            inputs=[input_image, confidence_slider],
+            outputs=[output_image, detection_text]
+        )
+        
+        # Auto-detect when confidence threshold changes
+        confidence_slider.change(
+            fn=detect_objects,
+            inputs=[input_image, confidence_slider],
+            outputs=[output_image, detection_text]
+        )
+        
+        # Footer
+        gr.HTML("""
+        <div style="text-align: center; padding: 20px; color: #666;">
+            <p>Powered by YOLOv8 and Gradio | Detects 80 COCO classes including people, animals, vehicles, and everyday objects</p>
+        </div>
+        """)
+    
+    return interface
+
+# ======= LAUNCH APP =======
+if __name__ == "__main__":
+    # Create and launch the interface
+    interface = create_interface()
+    
+    # Launch options
+    interface.launch(
+        server_name="127.0.0.1",  # Make accessible from any IP
+        server_port=7860,       # Default Gradio port
+        share=True,            # Create public sharing link
+        show_error=True,       # Show errors in interface
+        pwa=True               # Enable PWA mode
+    )
